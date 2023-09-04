@@ -5,6 +5,9 @@ import re
 from enum import Enum
 
 
+
+### Class definitions ###
+
 class Parser_state(Enum):
     NORMAL = 1
     IN_TOOLCHANGE = 2
@@ -24,9 +27,14 @@ class Toolchange():
         return self.__str__()
 
 
+
+### Debug Constant Definitions ###
+
 DEBUG = True
 DEBUG_ENV = True
 LOG = True
+DEBUG_PATH = "C:\\Users\\roslan\\Desktop\\mmutest.gcode"
+LOG_PATH = "C:\\Users\\roslan\\Desktop\\test.txt"
 
 # When switching from colder material to hotter material we:
 # - Insert M109 S<X>(Wait for hotend temp) (for new hotter temperature) before last little wipe sweep on wipe tower before the hotend moves to the object again
@@ -38,8 +46,9 @@ LOG = True
 # - Insert M104 S<X> right before TOOLCHANGE_WIPE_STR to wipe the last bit of old material with the hot temperature while cooling down when the material transition happens in the nozzle
 # - Insert M109 S<X> (Wait for hotend temp) before last little wipe sweep on wipe tower before the hotend moves to the object again
 
-DEBUG_PATH = "C:\\Users\\roslan\\Desktop\\mmutest.gcode"
-LOG_PATH = "C:\\Users\\roslan\\Desktop\\test.txt"
+
+
+### Constant Definitions ###
 
 TOOLCHANGE_START_STR = "; CP TOOLCHANGE START"
 TOOLCHANGE_LOAD_STR = "; CP TOOLCHANGE LOAD"
@@ -56,26 +65,80 @@ if DEBUG_ENV:
 
 
 ### Functions ###
+
 def write_log_line(line):
     if LOG:
         with open(LOG_PATH, 'a') as file:
             file.write(line + "\n")
 
+
+
+def extract_toolchanges(gcode_lines) -> list:
+    """Extracts toolchanges from a list of gcode lines (strings)
+
+    Args:
+        gcode_lines (list): A list of strings that represent the lines in the gocde
+
+    Returns:
+        list: A list containing Toolchanges
+    """
+
+    result = []
+    last_seen_temp = 0
+    current_seen_temp = 0
+    toolchange_start_line = 0
+    toolchange_end_line = 0
+    current_parser_state = Parser_state.NORMAL
+
+    for i in range(len(gcode_lines)):
+        cur_line = gcode_lines[i]
+
+        # Extract found temperatures
+        if (cur_line.startswith("M104")):
+            regex_match = re.search(r'S\d+', cur_line)
+    
+            str_temp = regex_match.group(0)[1:]
+            last_seen_temp = current_seen_temp
+            current_seen_temp = int(str_temp)
+
+        if (cur_line.startswith(TOOLCHANGE_START_STR)):
+            toolchange_start_line = i
+            current_parser_state = Parser_state.IN_TOOLCHANGE
+
+        if (cur_line.startswith(TOOLCHANGE_END_STR)):
+            current_parser_state = Parser_state.NORMAL
+            toolchange_end_line = i
+            result.append(Toolchange(toolchange_start_line, toolchange_end_line, last_seen_temp, current_seen_temp))
+
+    return result
+
+
+
+def init_args():
+    """Initializes the ArgumentParser with all the arguments that we need for this script
+
+    Returns:
+        _type_: _description_
+    """
+    parser = argparse.ArgumentParser("argument_parser")
+    parser.add_argument("gcode_path", help="The path of the source GCODE", default="-", type=str)
+    return parser.parse_args()
+
 ### End Functions ###
 
 
 
+### Start of script ###
+
 # Create global variables on global scope
 file_content = []
 output_file_content = []
-
+temps_str = str(os.getenv("SLIC3R_TEMPERATURE"))
 
 # Initialize Argument Parser
 if not DEBUG:
-    parser = argparse.ArgumentParser("argument_parser")
-    parser.add_argument("gcode_path", help="The path of the source GCODE", default="-", type=str)
-    args = parser.parse_args()
-    gcdode_source_path = args.gcode_path
+    scriptArgs = init_args()
+    gcdode_source_path = scriptArgs.gcode_path
 else:
     gcdode_source_path = DEBUG_PATH
 
@@ -86,8 +149,6 @@ write_log_line("Printer model: {printer}".format(printer = printer_model))
 if not DEBUG and printer_model != "MK3SMMU3":
     write_log_line("Exiting script because this printer does not have an MMU")
     sys.exit()
-
-temps_str = str(os.getenv("SLIC3R_TEMPERATURE"))
 
 # Read source GCODE into list
 with open(gcdode_source_path) as file:
@@ -100,60 +161,39 @@ for name, value in os.environ.items():
     write_log_line(name)
     write_log_line(value)
 
-
-toolchanges_list = []
-last_seen_temp = 0
-current_seen_temp = 0
-toolchange_start_line = 0
-toolchange_end_line = 0
-current_parser_state = Parser_state.NORMAL
-
 # Iterate over GCODE and detect tool changes and their mode
-for i in range(len(file_content)):
-    cur_line = file_content[i]
-
-    # Extract found temperatures
-    if (cur_line.startswith("M104")):
-        regex_match = re.search(r'S\d+', cur_line)
-    
-        str_temp = regex_match.group(0)[1:]
-        last_seen_temp = current_seen_temp
-        current_seen_temp = int(str_temp)
-
-        if (current_parser_state == Parser_state.IN_TOOLCHANGE):
-            # We are changing temperatures for a toolchange
-
-            if current_seen_temp > last_seen_temp:
-                # Colder to Hotter
-                output_file_content[toolchange_start_line] = output_file_content[toolchange_start_line].strip() + " - BetterMMU: {old_temp} -> {new_temp}".format(old_temp = last_seen_temp, new_temp = current_seen_temp) + "\n"
-
-            elif current_seen_temp < last_seen_temp:
-                # Hotter to colder
-                output_file_content[toolchange_start_line] = output_file_content[toolchange_start_line].strip() + " - BetterMMU: {old_temp} -> {new_temp}".format(old_temp = last_seen_temp, new_temp = current_seen_temp) + "\n"
-
-
-    if (cur_line.startswith(TOOLCHANGE_START_STR)):
-        toolchange_start_line = i
-        current_parser_state = Parser_state.IN_TOOLCHANGE
-
-    if (cur_line.startswith(TOOLCHANGE_END_STR)):
-        current_parser_state = Parser_state.NORMAL
-        toolchange_end_line = i
-        toolchanges_list.append(Toolchange(toolchange_start_line, toolchange_end_line, last_seen_temp, current_seen_temp))
+toolchanges_list = extract_toolchanges(file_content)
 
 write_log_line("GCODE has {num} toolchanges with different temps".format(num = len(toolchanges_list)))
 write_log_line(str(toolchanges_list))
 
-
 # Iterate over Toolchanges to optimize them
 for toolchange in toolchanges_list:
     if toolchange.old_temp < toolchange.new_temp:
-        # Change from cold to hot
-        
+    # Change from cold to hot
+    
 
     elif toolchange.old_temp > toolchange.new_temp:
-
+    # Change from hot to cold
 
 # Write GCODE inplace
 with open(gcdode_source_path, "w") as output_file:
     output_file.writelines(output_file_content)
+
+
+
+### End of Script ###
+
+
+
+
+#        if (current_parser_state == Parser_state.IN_TOOLCHANGE):
+#            # We are changing temperatures for a toolchange
+#
+#            if current_seen_temp > last_seen_temp:
+#                # Colder to Hotter
+#                output_file_content[toolchange_start_line] = output_file_content[toolchange_start_line].strip() + " - BetterMMU: {old_temp} -> {new_temp}".format(old_temp = last_seen_temp, new_temp = current_seen_temp) + "\n"
+#
+#            elif current_seen_temp < last_seen_temp:
+#                # Hotter to colder
+#                output_file_content[toolchange_start_line] = output_file_content[toolchange_start_line].strip() + " - BetterMMU: {old_temp} -> {new_temp}".format(old_temp = last_seen_temp, new_temp = current_seen_temp) + "\n"
